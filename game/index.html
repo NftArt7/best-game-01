@@ -367,14 +367,14 @@ function drawHUD() {
   ctx.restore();
   buttons.push({ x: 1150, y: 12, w: 110, h: 52, label: '', fn: () => {} }); // spacer guard
   // pause + mute buttons (top-right corner, below lives row)
-  buttons.push({ x: 1180, y: 66, w: 44, h: 30, label: 'II', fn: () => { if (state === 'play') state = 'pause'; else if (state === 'pause') state = 'play'; } });
-  buttons.push({ x: 1228, y: 66, w: 44, h: 30, label: muted ? 'MUTE' : 'SOUND', fn: () => { muted = !muted; if (!muted) sfx.click(); } });
+  buttons.push({ x: 1152, y: 66, w: 44, h: 30, label: 'II', fn: () => { if (state === 'play') state = 'pause'; else if (state === 'pause') state = 'play'; } });
+  buttons.push({ x: 1204, y: 66, w: 64, h: 30, label: muted ? 'MUTE' : 'SOUND', fn: () => { muted = !muted; if (!muted) sfx.click(); } });
   ctx.save();
   ctx.font = 'bold 13px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1180, 66, 44, 30, 8); ctx.fill();
-  ctx.fillStyle = '#cfeeff'; ctx.fillText('II', 1202, 82);
-  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1228, 66, 44, 30, 8); ctx.fill();
-  ctx.fillStyle = muted ? '#ff8a8a' : '#cfeeff'; ctx.fillText(muted ? 'MUTE' : 'SOUND', 1250, 82);
+  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1152, 66, 44, 30, 8); ctx.fill();
+  ctx.fillStyle = '#cfeeff'; ctx.fillText('II', 1174, 82);
+  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1204, 66, 64, 30, 8); ctx.fill();
+  ctx.fillStyle = muted ? '#ff8a8a' : '#cfeeff'; ctx.fillText(muted ? 'MUTE' : 'SOUND', 1236, 82);
   ctx.restore();
 }
 function panel(x, y, w, h, title, sub) {
