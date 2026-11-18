@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ABYSSAL HARVEST — a deep-sea pearl-diving arcade game</title>
+<style>
+  html,body{margin:0;padding:0;background:#010814;height:100%;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{width:min(100vw,177.78vh);height:min(100vh,56.25vw);display:block;
+    background:#010814;box-shadow:0 0 80px rgba(20,120,180,.35);border-radius:6px}
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<script>
+'use strict';
+/* ABYSSAL HARVEST — dive five depths, gather pearls, dodge the deep.
+   One file, no libraries, no network. Mouse or WASD/arrows to swim.
+   Collect the pearls of each depth; the Heart Pearl waits in The Trench. */
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 1280, H = 720;
+const DEPTHS = ['Sunlit Shelf','Kelp Forest','Twilight Reef','Midnight Wall','The Trench'];
+const DEPTH_TOP = ['#0a4a6e','#0b3a5e','#0a2a4e','#071a38','#040d24'];
+const DEPTH_BOT = ['#062a44','#072a42','#061e36','#041224','#01060f'];
+
+/* ---------- state ---------- */
+let state = 'title';            // title | play | pause | clear | win | over
+let level = 1, score = 0, lives = 3, combo = 0, comboT = 0;
+let need = 0, got = 0, best = 0, heartSpawned = false, heartTaken = false;
+let shake = 0, flash = 0, flashCol = '255,60,60', t = 0, invuln = 0;
+let muted = false, paused = false;
+try { best = parseInt(localStorage.getItem('abyssal_best') || '0', 10) || 0; } catch (e) { best = 0; }
+
+const player = { x: W/2, y: H*0.62, vx: 0, vy: 0, r: 20, face: 1, kick: 0 };
+const mouse = { x: W/2, y: H*0.62, active: false };
+const keys = {};
+let pearls = [], jellies = [], mines = [], parts = [], pops = [], bubbles = [], plank = [];
+let spawnT = 0, jellyT = 0, mineT = 0;
+let buttons = [];   // {x,y,w,h,label,fn} rebuilt each frame per state
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+/* ---------- audio (synth, lazy) ---------- */
+let AC = null;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  return AC;
+}
+function tone(f, d, type, g, when, slide) {
+  if (muted) return; const c = ac(); if (!c) return;
+  try {
+    const o = c.createOscillator(), gn = c.createGain();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(f, c.currentTime + (when || 0));
+    if (slide) o.frequency.exponentialRampToValueAtTime(slide, c.currentTime + (when || 0) + d);
+    gn.gain.setValueAtTime(0.0001, c.currentTime + (when || 0));
+    gn.gain.exponentialRampToValueAtTime(g || 0.12, c.currentTime + (when || 0) + 0.015);
+    gn.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + (when || 0) + d);
+    o.connect(gn); gn.connect(c.destination);
+    o.start(c.currentTime + (when || 0)); o.stop(c.currentTime + (when || 0) + d + 0.05);
+  } catch (e) {}
+}
+const sfx = {
+  click() { tone(660, 0.07, 'triangle', 0.10); },
+  pearl(c) { const b = 520 + Math.min(c, 12) * 45; tone(b, 0.12, 'sine', 0.14); tone(b * 1.5, 0.18, 'sine', 0.10, 0.06); },
+  heart() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.22, 'sine', 0.14, i * 0.09)); },
+  hit() { tone(160, 0.3, 'sawtooth', 0.16, 0, 55); tone(90, 0.35, 'square', 0.10, 0.02, 40); },
+  clear() { [392, 523, 659, 784].forEach((f, i) => tone(f, 0.2, 'triangle', 0.12, i * 0.08)); },
+  win() { [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => tone(f, 0.3, 'sine', 0.13, i * 0.11)); },
+  over() { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.32, 'triangle', 0.12, i * 0.13)); },
+  bubble() { tone(rnd(300, 700), 0.08, 'sine', 0.03); }
+};
+
+/* ---------- helpers ---------- */
+function saveBest() { try { localStorage.setItem('abyssal_best', String(best)); } catch (e) {} }
+function addScore(n, x, y, label) {
+  score += n; if (score > best) { best = score; saveBest(); }
+  pops.push({ x, y, txt: (label || '+') + n, life: 1, col: '#ffe9a8' });
+}
+function burst(x, y, col, n, spd) {
+  for (let i = 0; i < (n || 14); i++) {
+    const a = rnd(0, Math.PI * 2), s = rnd(20, spd || 160);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 30, life: rnd(0.4, 0.9), max: 0.9, r: rnd(2, 5), col });
+  }
+}
+function ring(x, y, col) { parts.push({ x, y, vx: 0, vy: 0, life: 0.5, max: 0.5, r: 8, col, ring: true }); }
+function newPearl(heart) {
+  return { x: rnd(60, W - 60), y: rnd(-40, -10), r: heart ? 26 : 13, vy: rnd(22, 46), sway: rnd(0, 6.28), sw: rnd(0.4, 1.1), heart: !!heart, hue: heart ? 1 : 0 };
+}
+function newJelly() {
+  return { x: rnd(50, W - 50), y: rnd(-60, -20), r: rnd(24, 34), vy: rnd(30, 62), sway: rnd(0, 6.28), sw: rnd(0.5, 1.2), pulse: rnd(0, 6.28), tint: Math.random() < 0.5 ? '255,120,190' : '170,140,255' };
+}
+function newMine() {
+  return { x: rnd(60, W - 60), y: rnd(-50, -20), r: 22, vy: rnd(26, 48), sway: rnd(0, 6.28), sw: rnd(0.3, 0.8), rot: rnd(0, 6.28) };
+}
+function resetLevel(lv) {
+  level = lv; need = 6 + lv * 2; got = 0; heartSpawned = false; heartTaken = false;
+  pearls = []; jellies = []; mines = []; parts = []; pops = [];
+  player.x = W / 2; player.y = H * 0.62; player.vx = 0; player.vy = 0;
+  spawnT = 0; jellyT = 1.2; mineT = 3;
+  for (let i = 0; i < 5 + lv; i++) pearls.push(newPearl(false));
+  for (let i = 0; i < 1 + lv; i++) jellies.push(newJelly());
+  if (lv >= 2) mines.push(newMine());
+}
+function startGame() {
+  score = 0; lives = 3; combo = 0; comboT = 0; invuln = 0;
+  resetLevel(1); state = 'play'; sfx.click();
+}
+function loseLife(x, y) {
+  if (invuln > 0 || state !== 'play') return;
+  lives--; combo = 0; comboT = 0; invuln = 2; shake = 16; flash = 0.55; flashCol = '255,60,60';
+  burst(x, y, '#ff5a5a', 22, 220); ring(x, y, '#ff8080'); sfx.hit();
+  if (lives <= 0) { state = 'over'; sfx.over(); }
+}
+function levelClear() {
+  state = 'clear'; const bonus = 100 * level; addScore(bonus, W / 2, H / 2 - 40, 'DEPTH BONUS +');
+  burst(W / 2, H / 2, '#ffd76a', 40, 260); sfx.clear();
+}
+function winGame() {
+  state = 'win'; addScore(500, W / 2, H / 2 - 40, 'HEART PEARL +'); sfx.win();
+  for (let i = 0; i < 5; i++) burst(rnd(200, W - 200), rnd(120, 420), ['#ffd76a', '#7fe7ff', '#ff8ac2'][i % 3], 24, 240);
+}
+
+/* ---------- input ---------- */
+function toGame(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+}
+cv.addEventListener('mousemove', e => { const p = toGame(e); mouse.x = p.x; mouse.y = p.y; mouse.active = true; });
+cv.addEventListener('mousedown', e => { const p = toGame(e); mouse.x = p.x; mouse.y = p.y; mouse.active = true; ac(); clickAt(p.x, p.y); });
+window.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (state === 'title') startGame(); else if (state === 'over' || state === 'win') startGame(); else if (state === 'clear') advanceLevel(); }
+  if (e.key.toLowerCase() === 'p' && state === 'play') { state = 'pause'; sfx.click(); }
+  else if (e.key.toLowerCase() === 'p' && state === 'pause') { state = 'play'; sfx.click(); }
+  if (e.key.toLowerCase() === 'm') { muted = !muted; if (!muted) sfx.click(); }
+  if (e.key === 'Escape' && (state === 'play' || state === 'pause')) { state = state === 'play' ? 'pause' : 'play'; }
+});
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+function clickAt(x, y) {
+  for (const b of buttons) {
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+  }
+  if (state === 'play') { burst(player.x, player.y - 10, '#bfefff', 5, 90); }
+}
+function advanceLevel() {
+  if (level >= 5) { winGame(); return; }
+  resetLevel(level + 1); state = 'play'; sfx.click();
+}
+function btn(x, y, w, h, label, fn, accent) {
+  buttons.push({ x, y, w, h, label, fn, accent: !!accent });
+}
+
+/* ---------- update ---------- */
+function update(dt) {
+  t += dt;
+  if (shake > 0) shake = Math.max(0, shake - dt * 30);
+  if (flash > 0) flash = Math.max(0, flash - dt * 1.4);
+  if (invuln > 0) invuln -= dt;
+  if (comboT > 0) { comboT -= dt; if (comboT <= 0) combo = 0; }
+  // ambient plankton + bubbles
+  if (plank.length < 70) plank.push({ x: rnd(0, W), y: rnd(0, H), r: rnd(0.6, 2.2), s: rnd(4, 14), a: rnd(0.15, 0.5) });
+  for (const p of plank) { p.y -= p.s * dt; p.x += Math.sin(t * 0.5 + p.y * 0.01) * 6 * dt; if (p.y < -4) { p.y = H + 4; p.x = rnd(0, W); } }
+  if (Math.random() < dt * 2) bubbles.push({ x: rnd(40, W - 40), y: H + 8, r: rnd(2, 6), vy: rnd(24, 60), sway: rnd(0, 6.28) });
+  for (let i = bubbles.length - 1; i >= 0; i--) { const b = bubbles[i]; b.y -= b.vy * dt; b.x += Math.sin(t * 2 + b.sway) * 12 * dt; if (b.y < -10) bubbles.splice(i, 1); }
+  // particles + popups
+  for (let i = parts.length - 1; i >= 0; i--) { const p = parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy -= 12 * dt; if (p.ring) p.r += 260 * dt; if (p.life <= 0) parts.splice(i, 1); }
+  for (let i = pops.length - 1; i >= 0; i--) { const p = pops[i]; p.life -= dt * 0.9; p.y -= 42 * dt; if (p.life <= 0) pops.splice(i, 1); }
+
+  if (state !== 'play') return;
+  // movement: mouse-follow + keys
+  let tx = 0, ty = 0;
+  if (keys['arrowleft'] || keys['a']) tx -= 1;
+  if (keys['arrowright'] || keys['d']) tx += 1;
+  if (keys['arrowup'] || keys['w']) ty -= 1;
+  if (keys['arrowdown'] || keys['s']) ty += 1;
+  if (tx || ty) {
+    const m = Math.hypot(tx, ty); player.vx += tx / m * 1500 * dt; player.vy += ty / m * 1500 * dt;
+    mouse.active = false;
+  } else if (mouse.active) {
+    const dx = mouse.x - player.x, dy = mouse.y - player.y, d = Math.hypot(dx, dy);
+    if (d > 6) { player.vx += dx / d * 1400 * dt; player.vy += dy / d * 1400 * dt; }
+  }
+  player.vx *= Math.pow(0.0015, dt); player.vy *= Math.pow(0.0015, dt);
+  const sp = Math.hypot(player.vx, player.vy);
+  if (sp > 360) { player.vx *= 360 / sp; player.vy *= 360 / sp; }
+  player.x = clamp(player.x + player.vx * dt, 26, W - 26);
+  player.y = clamp(player.y + player.vy * dt, 60, H - 40);
+  if (Math.abs(player.vx) > 20) player.face = player.vx > 0 ? 1 : -1;
+  player.kick += dt * (4 + sp * 0.02);
+  if (Math.random() < dt * 14) {
+    bubbles.push({ x: player.x - player.face * 12, y: player.y - 14, r: rnd(1.5, 4), vy: rnd(30, 70), sway: rnd(0, 6.28) });
+    if (Math.random() < 0.25) sfx.bubble();
+  }
+  // spawns scale with depth
+  spawnT -= dt; jellyT -= dt; mineT -= dt;
+  if (spawnT <= 0) { pearls.push(newPearl(false)); spawnT = rnd(0.7, 1.3) - level * 0.05; }
+  if (jellyT <= 0) { jellies.push(newJelly()); jellyT = rnd(2.2, 3.6) - level * 0.18; }
+  if (level >= 2 && mineT <= 0) { mines.push(newMine()); mineT = rnd(4.5, 7) - level * 0.3; }
+  if (level === 5 && got >= need && !heartSpawned) { pearls.push(newPearl(true)); heartSpawned = true; }
+  // pearls
+  for (let i = pearls.length - 1; i >= 0; i--) {
+    const p = pearls[i]; p.y += p.vy * dt; p.sway += dt * p.sw; p.x += Math.sin(p.sway) * 22 * dt;
+    if (p.y > H + 30) { pearls.splice(i, 1); continue; }
+    if (dist(p, player) < p.r + player.r - 2) {
+      if (p.heart) { heartTaken = true; pearls.splice(i, 1); winGame(); return; }
+      combo++; comboT = 3; const val = 10 * Math.min(combo, 8);
+      addScore(val, p.x, p.y, ''); got++;
+      burst(p.x, p.y, '#ffe9a8', 16, 180); ring(p.x, p.y, '#ffe9a8'); sfx.pearl(combo);
+      pearls.splice(i, 1);
+      if (got >= need && level < 5) { levelClear(); return; }
+    }
+  }
+  // jellies
+  for (let i = jellies.length - 1; i >= 0; i--) {
+    const j = jellies[i]; j.y += j.vy * dt; j.sway += dt * j.sw; j.x += Math.sin(j.sway) * 30 * dt; j.pulse += dt * 3;
+    if (j.y > H + 50) { jellies.splice(i, 1); continue; }
+    if (dist(j, player) < j.r * 0.85 + player.r - 6) { jellies.splice(i, 1); loseLife(j.x, j.y); if (state !== 'play') return; }
+  }
+  // mines
+  for (let i = mines.length - 1; i >= 0; i--) {
+    const m = mines[i]; m.y += m.vy * dt; m.sway += dt * m.sw; m.x += Math.sin(m.sway) * 16 * dt; m.rot += dt * 0.6;
+    if (m.y > H + 40) { mines.splice(i, 1); continue; }
+    if (dist(m, player) < m.r + player.r - 8) { mines.splice(i, 1); loseLife(m.x, m.y); if (state !== 'play') return; }
+  }
+}
+
+/* ---------- drawing ---------- */
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, DEPTH_TOP[level - 1]); g.addColorStop(1, DEPTH_BOT[level - 1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // light rays
+  ctx.save(); ctx.globalAlpha = 0.05 + 0.02 * Math.sin(t * 0.4);
+  for (let i = 0; i < 4; i++) {
+    const x0 = 180 + i * 300 + Math.sin(t * 0.3 + i * 1.7) * 40;
+    const gr = ctx.createLinearGradient(x0, 0, x0 + 120, H);
+    gr.addColorStop(0, 'rgba(160,220,255,0.55)'); gr.addColorStop(1, 'rgba(160,220,255,0)');
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0 + 70, 0); ctx.lineTo(x0 + 260, H); ctx.lineTo(x0 + 60, H); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  // plankton
+  for (const p of plank) { ctx.globalAlpha = p.a; ctx.fillStyle = '#cfeeff'; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  // bubbles
+  for (const b of bubbles) {
+    ctx.strokeStyle = 'rgba(200,235,255,0.55)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.29); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.beginPath(); ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.25, 0, 6.29); ctx.fill();
+  }
+  // seafloor
+  ctx.fillStyle = '#02101f';
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 80) ctx.lineTo(x, H - 26 - Math.sin(x * 0.008 + level) * 14 - Math.sin(x * 0.02) * 8);
+  ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  // corals
+  const coralCols = ['#123c55', '#0f3350', '#143a4e'];
+  for (let i = 0; i < 7; i++) {
+    const cx = 60 + i * 180 + Math.sin(i * 7.3) * 40, ch = 26 + ((i * 37) % 34);
+    ctx.fillStyle = coralCols[i % 3];
+    ctx.beginPath(); ctx.moveTo(cx - 12, H); ctx.quadraticCurveTo(cx - 16, H - ch, cx, H - ch - 10);
+    ctx.quadraticCurveTo(cx + 16, H - ch, cx + 12, H); ctx.closePath(); ctx.fill();
+  }
+}
+function drawPearl(p) {
+  const glow = ctx.createRadialGradient(p.x, p.y, 1, p.x, p.y, p.r * 3.2);
+  glow.addColorStop(0, p.heart ? 'rgba(255,214,106,0.55)' : 'rgba(255,240,200,0.4)');
+  glow.addColorStop(1, 'rgba(255,240,200,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 3.2, 0, 6.29); ctx.fill();
+  const g = ctx.createRadialGradient(p.x - p.r * 0.3, p.y - p.r * 0.35, 1, p.x, p.y, p.r);
+  if (p.heart) { g.addColorStop(0, '#fff6d8'); g.addColorStop(0.55, '#ffd76a'); g.addColorStop(1, '#e8960c'); }
+  else { g.addColorStop(0, '#ffffff'); g.addColorStop(0.55, '#ffe9a8'); g.addColorStop(1, '#d9a441'); }
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.beginPath(); ctx.arc(p.x - p.r * 0.32, p.y - p.r * 0.36, p.r * 0.22, 0, 6.29); ctx.fill();
+}
+function drawJelly(j) {
+  const pulse = 1 + Math.sin(j.pulse) * 0.12;
+  ctx.save(); ctx.translate(j.x, j.y); ctx.scale(pulse, 1 / pulse);
+  ctx.strokeStyle = 'rgba(' + j.tint + ',0.8)'; ctx.lineWidth = 2;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath(); ctx.moveTo(i * 7, j.r * 0.5);
+    ctx.quadraticCurveTo(i * 7 + Math.sin(t * 3 + i) * 8, j.r * 1.1, i * 7 + Math.sin(t * 2 + i * 2) * 10, j.r * 1.7);
+    ctx.stroke();
+  }
+  const g = ctx.createRadialGradient(0, -4, 2, 0, 0, j.r);
+  g.addColorStop(0, 'rgba(' + j.tint + ',0.95)'); g.addColorStop(1, 'rgba(' + j.tint + ',0.25)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, j.r, Math.PI, 0); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(-j.r * 0.32, -2, 2.6, 0, 6.29); ctx.arc(j.r * 0.32, -2, 2.6, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+function drawMine(m) {
+  ctx.save(); ctx.translate(m.x, m.y); ctx.rotate(m.rot);
+  const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, m.r * 2.4);
+  glow.addColorStop(0, 'rgba(255,70,70,0.4)'); glow.addColorStop(1, 'rgba(255,70,70,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, m.r * 2.4, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#1a1214'; ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < 12; i++) {
+    const a = i / 12 * Math.PI * 2, r = i % 2 ? m.r * 0.7 : m.r * 1.25;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ff5a5a'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+function drawPlayer() {
+  const p = player, blink = invuln > 0 && Math.floor(t * 10) % 2 === 0;
+  if (blink) return;
+  ctx.save(); ctx.translate(p.x, p.y); ctx.scale(p.face, 1);
+  // glow
+  const glow = ctx.createRadialGradient(0, 0, 4, 0, 0, 64);
+  glow.addColorStop(0, 'rgba(127,231,255,0.35)'); glow.addColorStop(1, 'rgba(127,231,255,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, 64, 0, 6.29); ctx.fill();
+  // fins (kick)
+  const k = Math.sin(p.kick) * 8;
+  ctx.fillStyle = '#f4a259';
+  ctx.beginPath(); ctx.moveTo(-16, 2); ctx.lineTo(-30, -6 + k * 0.5); ctx.lineTo(-30, 8 + k * 0.5); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-16, 8); ctx.lineTo(-28, 12 + k); ctx.lineTo(-26, 18 + k); ctx.closePath(); ctx.fill();
+  // tank
+  ctx.fillStyle = '#8d99ae'; rr(-14, -12, 12, 20, 5); ctx.fill();
+  ctx.fillStyle = '#6c757d'; rr(-14, -12, 12, 5, 3); ctx.fill();
+  // body
+  ctx.fillStyle = '#14213d'; ctx.beginPath(); ctx.ellipse(-2, 2, 18, 11, 0, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#ffd166'; ctx.beginPath(); ctx.ellipse(-2, 2, 18, 11, 0, -0.5, 0.9); ctx.fill();
+  // head + mask
+  ctx.fillStyle = '#f1c27d'; ctx.beginPath(); ctx.arc(16, -4, 9, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#22223b'; ctx.beginPath(); ctx.arc(16, -4, 9, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#7fe7ff'; rr(14, -8, 12, 7, 3); ctx.fill();
+  ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(26, -5); ctx.lineTo(33, -2); ctx.stroke();
+  ctx.restore();
+}
+function drawHeart(x, y, s, col) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(0, 6);
+  ctx.bezierCurveTo(-9, -2, -5, -10, 0, -4); ctx.bezierCurveTo(5, -10, 9, -2, 0, 6);
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function drawHUD() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(14, 12, 500, 52, 12); ctx.fill();
+  ctx.fillStyle = '#eaf6ff'; ctx.font = 'bold 24px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('SCORE ' + score, 30, 38);
+  ctx.font = '15px system-ui, sans-serif'; ctx.fillStyle = '#9fc6e2';
+  ctx.fillText('BEST ' + best, 30, 56);
+  // depth + pearls
+  ctx.fillStyle = '#eaf6ff'; ctx.font = 'bold 17px system-ui, sans-serif';
+  ctx.fillText('DEPTH ' + level + ' · ' + DEPTHS[level - 1], 240, 30);
+  ctx.fillStyle = 'rgba(255,255,255,0.16)'; rr(240, 42, 250, 10, 5); ctx.fill();
+  ctx.fillStyle = '#ffd76a'; rr(240, 42, 250 * clamp(got / need, 0, 1), 10, 5); ctx.fill();
+  ctx.fillStyle = '#ffe9a8'; ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText(got + ' / ' + need + ' pearls' + (level === 5 && got >= need ? ' — take the Heart Pearl!' : ''), 240, 60);
+  // lives
+  for (let i = 0; i < 3; i++) drawHeart(1060 + i * 30, 38, 1.15, i < lives ? '#ff5a7a' : 'rgba(255,255,255,0.18)');
+  // combo
+  if (combo >= 2) {
+    ctx.fillStyle = '#ffd76a'; ctx.font = 'bold 20px system-ui, sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText('COMBO x' + Math.min(combo, 8), 1260, 38); ctx.textAlign = 'left';
+  }
+  ctx.restore();
+  buttons.push({ x: 1150, y: 12, w: 110, h: 52, label: '', fn: () => {} }); // spacer guard
+  // pause + mute buttons (top-right corner, below lives row)
+  buttons.push({ x: 1180, y: 66, w: 44, h: 30, label: 'II', fn: () => { if (state === 'play') state = 'pause'; else if (state === 'pause') state = 'play'; } });
+  buttons.push({ x: 1228, y: 66, w: 44, h: 30, label: muted ? 'MUTE' : 'SOUND', fn: () => { muted = !muted; if (!muted) sfx.click(); } });
+  ctx.save();
+  ctx.font = 'bold 13px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1180, 66, 44, 30, 8); ctx.fill();
+  ctx.fillStyle = '#cfeeff'; ctx.fillText('II', 1202, 82);
+  ctx.fillStyle = 'rgba(2,12,28,0.55)'; rr(1228, 66, 44, 30, 8); ctx.fill();
+  ctx.fillStyle = muted ? '#ff8a8a' : '#cfeeff'; ctx.fillText(muted ? 'MUTE' : 'SOUND', 1250, 82);
+  ctx.restore();
+}
+function panel(x, y, w, h, title, sub) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,14,32,0.82)'; rr(x, y, w, h, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(127,231,255,0.45)'; ctx.lineWidth = 2; rr(x, y, w, h, 18); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#7fe7ff'; ctx.font = 'bold 44px system-ui, sans-serif';
+  ctx.fillText(title, x + w / 2, y + 58);
+  if (sub) { ctx.fillStyle = '#cfeeff'; ctx.font = '19px system-ui, sans-serif'; ctx.fillText(sub, x + w / 2, y + 100); }
+  ctx.restore();
+  return x + w / 2;
+}
+function bigButton(cx, y, label, fn, accent) {
+  const w = 300, h = 56, x = cx - w / 2;
+  ctx.save();
+  ctx.fillStyle = accent ? '#ffd76a' : 'rgba(127,231,255,0.16)';
+  rr(x, y, w, h, 14); ctx.fill();
+  ctx.strokeStyle = accent ? '#e8960c' : 'rgba(127,231,255,0.6)'; ctx.lineWidth = 2; rr(x, y, w, h, 14); ctx.stroke();
+  ctx.fillStyle = accent ? '#3a2500' : '#dff4ff'; ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, cx, y + h / 2 + 1);
+  ctx.restore();
+  btn(x, y, w, h, label, fn, accent);
+}
+function drawTitle() {
+  const cx = panel(W / 2 - 330, 120, 660, 430, 'ABYSSAL HARVEST', 'Dive five depths. Gather the pearls. Dodge the deep.');
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 20px system-ui, sans-serif';
+  ctx.fillText('★  A deep-sea pearl-diving arcade game  ★', W / 2, 268);
+  ctx.fillStyle = '#cfeeff'; ctx.font = '17px system-ui, sans-serif';
+  const lines = [
+    'MOUSE or WASD / ARROWS — swim',
+    'Collect pearls to clear each depth — chains build your combo',
+    'Jellyfish and mines cost a life. You have 3.',
+    'Depth 5 hides the Heart Pearl. Take it and win.',
+    'P pause · M mute · best score saved on this machine'
+  ];
+  lines.forEach((l, i) => ctx.fillText(l, W / 2, 306 + i * 28));
+  ctx.fillStyle = '#9fc6e2'; ctx.font = '15px system-ui, sans-serif';
+  ctx.fillText('BEST SCORE  ' + best, W / 2, 462);
+  ctx.restore();
+  bigButton(cx, 486, '▶  DIVE IN', startGame, true);
+}
+function drawPause() {
+  ctx.fillStyle = 'rgba(1,8,20,0.6)'; ctx.fillRect(0, 0, W, H);
+  const cx = panel(W / 2 - 260, 220, 520, 260, 'PAUSED', 'The deep waits for you.');
+  bigButton(cx, 380, 'RESUME', () => { state = 'play'; sfx.click(); }, true);
+  bigButton(cx, 448, 'RESTART DIVE', startGame, false);
+}
+function drawClear() {
+  const cx = panel(W / 2 - 300, 190, 600, 330, 'DEPTH ' + level + ' CLEAR!', 'You gathered every pearl of ' + DEPTHS[level - 1] + '.');
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.fillText('SCORE  ' + score + '   ·   BONUS  +' + (100 * level), W / 2, 330);
+  ctx.fillStyle = '#cfeeff'; ctx.font = '17px system-ui, sans-serif';
+  ctx.fillText(level >= 5 ? 'One depth remains: The Trench.' : 'Next: ' + DEPTHS[level] + ' — deeper, darker, hungrier.', W / 2, 366);
+  ctx.restore();
+  bigButton(cx, 420, level >= 5 ? 'DESCEND TO THE TRENCH' : 'DIVE DEEPER  ▶', advanceLevel, true);
+}
+function drawWin() {
+  const cx = panel(W / 2 - 330, 130, 660, 430, '★ THE HEART IS YOURS ★', 'You took the Heart Pearl from The Trench.');
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.fillText('FINAL SCORE  ' + score, W / 2, 300);
+  ctx.fillStyle = '#cfeeff'; ctx.font = '19px system-ui, sans-serif';
+  ctx.fillText(score >= best && score > 0 ? 'A new best score — the trench remembers you.' : 'Best score on this machine: ' + best, W / 2, 340);
+  ctx.fillStyle = '#9fc6e2'; ctx.font = '16px system-ui, sans-serif';
+  ctx.fillText('Five depths, every pearl, one heart. Dive again?', W / 2, 380);
+  ctx.restore();
+  bigButton(cx, 430, '↻  DIVE AGAIN', startGame, true);
+}
+function drawOver() {
+  const cx = panel(W / 2 - 300, 190, 600, 330, 'LOST TO THE DEEP', 'The jellies keep your pearls now.');
+  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 24px system-ui, sans-serif';
+  ctx.fillText('SCORE  ' + score + '   ·   BEST  ' + best, W / 2, 330);
+  ctx.fillStyle = '#cfeeff'; ctx.font = '17px system-ui, sans-serif';
+  ctx.fillText('You reached ' + DEPTHS[level - 1] + ' (depth ' + level + ' of 5).', W / 2, 368);
+  ctx.restore();
+  bigButton(cx, 420, '↻  TRY AGAIN', startGame, true);
+}
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
+  buttons = [];
+  drawBackground();
+  if (state === 'title') {
+    // ambient demo scene behind the title
+    for (const p of pearls) drawPearl(p);
+    drawPlayer();
+    drawTitle();
+  } else {
+    for (const p of pearls) drawPearl(p);
+    for (const j of jellies) drawJelly(j);
+    for (const m of mines) drawMine(m);
+    drawPlayer();
+    for (const p of parts) {
+      if (p.ring) { ctx.strokeStyle = p.col; ctx.globalAlpha = p.life / p.max; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.stroke(); ctx.globalAlpha = 1; }
+      else { ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.col; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill(); ctx.globalAlpha = 1; }
+    }
+    for (const p of pops) {
+      ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.col; ctx.font = 'bold 20px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.fillText(p.txt, p.x, p.y); ctx.globalAlpha = 1;
+    }
+    drawHUD();
+    if (state === 'pause') drawPause();
+    else if (state === 'clear') drawClear();
+    else if (state === 'win') drawWin();
+    else if (state === 'over') drawOver();
+  }
+  if (flash > 0) { ctx.fillStyle = 'rgba(' + flashCol + ',' + (flash * 0.5) + ')'; ctx.fillRect(0, 0, W, H); }
+  // vignette
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 0.95);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,10,0.45)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+/* ---------- screenshot hooks (?shot=title|play|win|over|clear) ---------- */
+function demoScene() {
+  // gentle ambient scene behind the title
+  for (let i = 0; i < 6; i++) pearls.push(newPearl(false));
+  pearls.forEach((p, i) => { p.y = 140 + i * 90; p.x = 150 + i * 180; p.vy = 0; });
+  player.x = W / 2; player.y = H * 0.62;
+}
+function shotScene(kind) {
+  if (kind === 'play') {
+    startGame(); level = 2; need = 10; got = 6; score = 1240; combo = 3; comboT = 2.5;
+    pearls = []; jellies = []; mines = [];
+    const spots = [[220, 300], [420, 180], [640, 340], [860, 200], [1060, 320], [330, 470], [760, 470], [980, 120]];
+    spots.forEach(s => { const p = newPearl(false); p.x = s[0]; p.y = s[1]; p.vy = 26; pearls.push(p); });
+    [[300, 150], [700, 130], [1020, 430]].forEach(s => { const j = newJelly(); j.x = s[0]; j.y = s[1]; j.vy = 34; jellies.push(j); });
+    const m = newMine(); m.x = 560; m.y = 430; m.vy = 26; mines.push(m);
+    burst(640, 300, '#ffe9a8', 18, 160);
+    player.x = 640; player.y = 420;
+  } else if (kind === 'win') {
+    startGame(); score = 4860; best = Math.max(best, score); state = 'win';
+  } else if (kind === 'over') {
+    startGame(); score = 1730; lives = 0; state = 'over';
+  } else if (kind === 'clear') {
+    startGame(); level = 3; score = 2480; state = 'clear';
+  } else {
+    state = 'title'; demoScene();
+  }
+}
+
+/* ---------- main loop ---------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+const params = new URLSearchParams(location.search);
+shotScene(params.get('shot') || 'title');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
